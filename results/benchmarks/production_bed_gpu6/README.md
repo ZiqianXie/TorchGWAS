@@ -8,9 +8,11 @@ variants, and 128 phenotypes. Its BED payload is 44,982,979,866 bytes.
 
 Measured cold scans include positional BED reads, packed H2D, GPU unpacking,
 covariate-adjusted beta/t computation, fused missing/invariant checks, and D2H
-into NumPy chunk arrays. Exact Student-t tail evaluation and filesystem output
-are excluded. Each measured cold repeat calls `POSIX_FADV_DONTNEED` for the BED
-before timing. Hot-cache results are not used for the headline value.
+into NumPy chunk arrays. The output-inclusive experiment additionally pipelines
+those chunks through a bounded four-buffer writer into one float32 `.npy` file;
+its timer ends after both `flush` and `fsync`. Exact Student-t tail evaluation
+is excluded. Each measured cold repeat calls `POSIX_FADV_DONTNEED` for the BED
+before timing. Hot-cache results are not used for the headline values.
 
 ## Results
 
@@ -23,6 +25,7 @@ before timing. Hot-cache results are not used for the headline value.
 | Cold read, 24 workers | 29.67 s / 1.516 GB/s |
 | Compiled cold scans, 6 repeats | 25.97-36.32 s; median 29.81 s |
 | Eager cold scan | 36.16 s |
+| Eager cold scan + pipelined 4.14 GB NPY dump, 3 repeats | 47.57, 48.65, 69.20 s; median 48.65 s |
 
 All scan repeats produced checksum `13089616136.36541` (the eager result
 differs only in the last printed floating-point digits). No missing or invariant
@@ -35,7 +38,11 @@ Four readers saturate this node-local disk. The compiled scan's median packed
 throughput is close to the independently measured cold-read ceiling, so GPU
 work is substantially hidden behind storage. Eager mode remains below one
 minute without a compilation-cache dependency and is appropriate for a
-one-off scan; compilation is useful for repeated scans.
+one-off scan; compilation is useful for repeated scans. Pipelining the complete
+8,086,101-by-128 t-statistic output keeps two of three cold eager repeats below
+one minute. Relative to the separate 36.16-second eager scan without file
+output, the median output-inclusive run adds 12.49 seconds, although the
+69.20-second third repeat shows material cold-storage variability.
 
 ## Files
 
@@ -43,6 +50,9 @@ one-off scan; compilation is useful for repeated scans.
 - `compiled_cold_run1.json`, `compiled_cold_run2.json`: two independent
   compiled invocations, three cold measured repeats each.
 - `eager_cold.json`: eager-mode invocation with one cold measured repeat.
+- `eager_cold_pipelined_npy.json`: three eager cold scans including a complete
+  4,140,083,840-byte NPY dump, flush, and fsync. Each temporary dump was
+  shape-checked and deleted after its timed measurement.
 - `bed_vs_zstd_validation.json`: independent hard-call comparison.
 - `fixture_conversion.json`: provenance for the BED fixture construction.
 - `metadata_cache_timing.json`: one-time cache build and cached reopen timing.

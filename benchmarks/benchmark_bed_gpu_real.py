@@ -64,7 +64,23 @@ def main() -> int:
         action="store_true",
         help="Use eager PyTorch kernels instead of torch.compile",
     )
+    parser.add_argument("--dump-t-dir", type=Path)
+    parser.add_argument("--dump-writer-depth", type=int, default=4)
+    parser.add_argument(
+        "--skip-first-scan",
+        action="store_true",
+        help="Skip the separate first-use scan (useful for an eager cold-only run)",
+    )
+    parser.add_argument(
+        "--discard-dumps",
+        action="store_true",
+        help="Validate and delete each NPY dump after its timed fsync completes",
+    )
     args = parser.parse_args()
+    if args.repeats <= 0:
+        raise ValueError("--repeats must be positive")
+    if args.discard_dumps and args.dump_t_dir is None:
+        raise ValueError("--discard-dumps requires --dump-t-dir")
 
     device = torch.device(args.device)
     torch.cuda.set_device(device)
@@ -92,23 +108,12 @@ def main() -> int:
         evicted = evict_local_file_pages(args.bed)
         cold_read = measure_packed_reads(genotype, args.chunk_size, args.workers)
         warm_read = measure_packed_reads(genotype, args.chunk_size, args.workers)
-    first_scan = measure_scan(
-        genotype,
-        phenotype,
-        covariates,
-        chunk_size=args.chunk_size,
-        workers=args.workers,
-        device=device,
-        compute_p_values=args.compute_p_values,
-        retain_t_array=args.retain_t_array,
-    )
-    repeats = []
-    repeat_evictions = []
-    for _ in range(args.repeats):
-        repeat_evictions.append(
-            evict_local_file_pages(args.bed) if args.cold_scan_repeats else False
-        )
-        repeats.append(measure_scan(
+    first_dump_path = None
+    if args.dump_t_dir is not None:
+        first_dump_path = args.dump_t_dir / "first_scan.npy"
+    first_scan = None
+    if not args.skip_first_scan:
+        first_scan = measure_scan(
             genotype,
             phenotype,
             covariates,
@@ -117,7 +122,44 @@ def main() -> int:
             device=device,
             compute_p_values=args.compute_p_values,
             retain_t_array=args.retain_t_array,
-        ))
+            dump_t_path=first_dump_path,
+            dump_writer_depth=args.dump_writer_depth,
+        )
+        if args.discard_dumps and first_dump_path is not None:
+            np.load(first_dump_path, mmap_mode="r", allow_pickle=False)
+            first_dump_path.unlink()
+            first_scan["dump_discarded_after_measurement"] = True
+    repeats = []
+    repeat_evictions = []
+    for repeat_index in range(args.repeats):
+        repeat_evictions.append(
+            evict_local_file_pages(args.bed) if args.cold_scan_repeats else False
+        )
+        dump_path = (
+            None
+            if args.dump_t_dir is None
+            else args.dump_t_dir / f"repeat_{repeat_index + 1}.npy"
+        )
+        measurement = measure_scan(
+            genotype,
+            phenotype,
+            covariates,
+            chunk_size=args.chunk_size,
+            workers=args.workers,
+            device=device,
+            compute_p_values=args.compute_p_values,
+            retain_t_array=args.retain_t_array,
+            dump_t_path=dump_path,
+            dump_writer_depth=args.dump_writer_depth,
+        )
+        if args.discard_dumps and dump_path is not None:
+            dumped = np.load(dump_path, mmap_mode="r", allow_pickle=False)
+            if dumped.shape != (genotype.shape[1], phenotype.shape[1]):
+                raise RuntimeError(f"unexpected dumped t-statistic shape: {dumped.shape}")
+            del dumped
+            dump_path.unlink()
+            measurement["dump_discarded_after_measurement"] = True
+        repeats.append(measurement)
     result = {
         "bed": str(args.bed),
         "device": str(device),
@@ -136,6 +178,9 @@ def main() -> int:
         "compute_p_values": args.compute_p_values,
         "execution_mode": "eager" if args.eager else "torch.compile",
         "retain_t_array": args.retain_t_array,
+        "dump_t_dir": None if args.dump_t_dir is None else str(args.dump_t_dir),
+        "dump_writer_depth": args.dump_writer_depth,
+        "skip_first_scan": args.skip_first_scan,
         "cold_scan_repeats": args.cold_scan_repeats,
         "repeat_cache_eviction_requested": repeat_evictions,
         "tf32_matmul_allowed": torch.backends.cuda.matmul.allow_tf32,

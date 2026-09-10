@@ -1,0 +1,88 @@
+{
+  "bed": "/data/zxie3/torchgwas_bed_benchmark/discovery_hardcall/T1_discovery_hardcall.bed",
+  "chunk_size": 5000,
+  "client_cache_eviction_requested": false,
+  "cold_read": null,
+  "cold_scan_repeats": true,
+  "compute_p_values": false,
+  "covariate_columns": 27,
+  "device": "cuda:0",
+  "dump_t_dir": "/data/zxie3/torchgwas_manuscript_benchmark_20260910/discovery_bed/npy_dump_eager_w4_depth4_v1",
+  "dump_writer_depth": 4,
+  "execution_mode": "eager",
+  "first_scan": null,
+  "gpu_name": "NVIDIA A100-SXM4-80GB",
+  "h2d_gbps": 17.21597726552863,
+  "metadata_cache_path": null,
+  "n_samples": 22250,
+  "n_traits": 128,
+  "n_variants": 8086101,
+  "repeat_cache_eviction_requested": [
+    true,
+    true,
+    true
+  ],
+  "retain_t_array": false,
+  "scan_exclusion_counts": {
+    "invariant": 0,
+    "missing": 0
+  },
+  "skip_first_scan": true,
+  "steady_scan_median": {
+    "dump_discarded_after_measurement": true,
+    "dumped_t_npy_bytes": 4140083840,
+    "dumped_t_npy_path": "/data/zxie3/torchgwas_manuscript_benchmark_20260910/discovery_bed/npy_dump_eager_w4_depth4_v1/repeat_2.npy",
+    "first_result_seconds": 1.7782454378902912,
+    "peak_gpu_allocated_gb": 1.274315264,
+    "retained_t_numpy_bytes": 0,
+    "scan_checksum": 13089616136.365416,
+    "scan_decoded_gbps": 14.793369953131972,
+    "scan_packed_gbps": 0.9246687308907097,
+    "scan_variants_per_second": 166217.63992283115,
+    "scan_wall_seconds": 48.64767063083127
+  },
+  "steady_scan_repeats": [
+    {
+      "dump_discarded_after_measurement": true,
+      "dumped_t_npy_bytes": 4140083840,
+      "dumped_t_npy_path": "/data/zxie3/torchgwas_manuscript_benchmark_20260910/discovery_bed/npy_dump_eager_w4_depth4_v1/repeat_1.npy",
+      "first_result_seconds": 1.7782454378902912,
+      "peak_gpu_allocated_gb": 1.273529344,
+      "retained_t_numpy_bytes": 0,
+      "scan_checksum": 13089616136.365416,
+      "scan_decoded_gbps": 15.128207830644042,
+      "scan_packed_gbps": 0.9455979793468856,
+      "scan_variants_per_second": 169979.8632656634,
+      "scan_wall_seconds": 47.57093484280631
+    },
+    {
+      "dump_discarded_after_measurement": true,
+      "dumped_t_npy_bytes": 4140083840,
+      "dumped_t_npy_path": "/data/zxie3/torchgwas_manuscript_benchmark_20260910/discovery_bed/npy_dump_eager_w4_depth4_v1/repeat_2.npy",
+      "first_result_seconds": 0.3442970719188452,
+      "peak_gpu_allocated_gb": 1.274315264,
+      "retained_t_numpy_bytes": 0,
+      "scan_checksum": 13089616136.365416,
+      "scan_decoded_gbps": 14.793369953131972,
+      "scan_packed_gbps": 0.9246687308907097,
+      "scan_variants_per_second": 166217.63992283115,
+      "scan_wall_seconds": 48.64767063083127
+    },
+    {
+      "dump_discarded_after_measurement": true,
+      "dumped_t_npy_bytes": 4140083840,
+      "dumped_t_npy_path": "/data/zxie3/torchgwas_manuscript_benchmark_20260910/discovery_bed/npy_dump_eager_w4_depth4_v1/repeat_3.npy",
+      "first_result_seconds": 3.5620172540657222,
+      "peak_gpu_allocated_gb": 1.274315264,
+      "retained_t_numpy_bytes": 0,
+      "scan_checksum": 13089616136.365416,
+      "scan_decoded_gbps": 10.399019975883771,
+      "scan_packed_gbps": 0.6499971699532745,
+      "scan_variants_per_second": 116842.92107734576,
+      "scan_wall_seconds": 69.20488571701571
+    }
+  ],
+  "tf32_matmul_allowed": false,
+  "warm_read": null,
+  "workers": 4
+}

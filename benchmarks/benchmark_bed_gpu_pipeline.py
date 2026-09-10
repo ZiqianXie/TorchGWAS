@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import queue
 import statistics
 import tempfile
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +16,67 @@ import torch
 
 from torchgwas.bed import PlinkBedGenotype, resolve_plink_triplet
 from torchgwas.linear import linear_scan_streaming_chunks
+
+
+class AsyncNpyWriter:
+    """Bounded single-writer pipeline for a marker-by-trait float32 NPY."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        shape: tuple[int, int],
+        chunk_size: int,
+        depth: int,
+    ) -> None:
+        if depth <= 0:
+            raise ValueError("writer depth must be positive")
+        if path.exists():
+            raise FileExistsError(f"refusing to overwrite {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self.output = np.lib.format.open_memmap(
+            path,
+            mode="w+",
+            dtype=np.float32,
+            shape=shape,
+        )
+        self.buffers = [
+            np.empty((chunk_size, shape[1]), dtype=np.float32)
+            for _ in range(depth)
+        ]
+        self.free: queue.Queue[int] = queue.Queue()
+        for index in range(depth):
+            self.free.put(index)
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="torchgwas-npy")
+        self.pending: deque[Future] = deque()
+
+    def _write(self, buffer_index: int, start: int, end: int) -> None:
+        try:
+            self.output[start:end] = self.buffers[buffer_index][: end - start]
+        finally:
+            self.free.put(buffer_index)
+
+    def submit(self, start: int, end: int, values: np.ndarray) -> None:
+        buffer_index = self.free.get()
+        np.copyto(self.buffers[buffer_index][: end - start], values, casting="no")
+        self.pending.append(self.pool.submit(self._write, buffer_index, start, end))
+        while self.pending and self.pending[0].done():
+            self.pending.popleft().result()
+
+    def close(self) -> int:
+        try:
+            while self.pending:
+                self.pending.popleft().result()
+            self.output.flush()
+            with self.path.open("rb") as handle:
+                os.fsync(handle.fileno())
+            return self.path.stat().st_size
+        finally:
+            self.pool.shutdown(wait=True, cancel_futures=True)
+            mmap = getattr(self.output, "_mmap", None)
+            if mmap is not None:
+                mmap.close()
 
 
 def write_valid_synthetic_bed(
@@ -112,7 +177,11 @@ def measure_scan(
     device: torch.device,
     compute_p_values: bool,
     retain_t_array: bool = False,
+    dump_t_path: Path | None = None,
+    dump_writer_depth: int = 4,
 ) -> dict:
+    if retain_t_array and dump_t_path is not None:
+        raise ValueError("retain_t_array and dump_t_path are mutually exclusive")
     torch.cuda.reset_peak_memory_stats(device)
     started = time.perf_counter()
     chunks, _ = linear_scan_streaming_chunks(
@@ -132,16 +201,29 @@ def measure_scan(
         if retain_t_array
         else None
     )
+    t_writer = (
+        AsyncNpyWriter(
+            dump_t_path,
+            shape=(genotype.shape[1], phenotype.shape[1]),
+            chunk_size=chunk_size,
+            depth=dump_writer_depth,
+        )
+        if dump_t_path is not None
+        else None
+    )
     for start, end, beta, t_stat, p_value in chunks:
         if first_result_seconds is None:
             first_result_seconds = time.perf_counter() - started
         checksum += float(beta[0, 0] + t_stat[-1, -1])
         if t_output is not None:
             t_output[start:end] = t_stat
+        if t_writer is not None:
+            t_writer.submit(start, end, t_stat)
         if p_value is not None:
             checksum += float(p_value[0, -1])
         checksum += start + end
     torch.cuda.synchronize(device)
+    dumped_t_bytes = 0 if t_writer is None else t_writer.close()
     wall_seconds = time.perf_counter() - started
     return {
         "scan_wall_seconds": wall_seconds,
@@ -156,6 +238,8 @@ def measure_scan(
         "peak_gpu_allocated_gb": torch.cuda.max_memory_allocated(device) / 1e9,
         "scan_checksum": checksum,
         "retained_t_numpy_bytes": 0 if t_output is None else int(t_output.nbytes),
+        "dumped_t_npy_bytes": dumped_t_bytes,
+        "dumped_t_npy_path": None if dump_t_path is None else str(dump_t_path),
     }
 
 

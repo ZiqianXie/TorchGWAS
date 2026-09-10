@@ -68,7 +68,8 @@ sharing a bottleneck.
 For an existing BED with matched phenotype and covariate arrays, measure the
 packed read boundary and the steady scan separately. Add `--retain-t-array`
 when the production contract returns the complete marker-by-trait t-statistic
-matrix in host NumPy memory:
+matrix in host NumPy memory, or `--dump-t-dir` to pipeline a complete `.npy`
+dump to storage:
 
 ```bash
 PYTHONPATH=src:benchmarks python benchmarks/benchmark_bed_gpu_real.py \
@@ -81,14 +82,17 @@ PYTHONPATH=src:benchmarks python benchmarks/benchmark_bed_gpu_real.py \
   --repeats 3 \
   --cold-scan-repeats \
   --skip-read-probes \
-  --retain-t-array
+  --dump-t-dir /local/output/t_statistics \
+  --dump-writer-depth 4
 ```
 
 With `--cold-scan-repeats`, the script requests per-file client page-cache
 eviction before every measured repeat when `posix_fadvise` is available. Use
 those cold repeats for manuscript-facing storage claims. First-use compilation
 is reported separately; hot-cache measurements are diagnostic only and should
-not replace cold-input results.
+not replace cold-input results. The NPY writer uses a bounded staging ring and
+one ordered writer thread; the timer ends only after `flush` and `fsync`, so the
+reported value includes durable output rather than page-cache admission alone.
 
 ## Calibrated stage runtime predictor
 
