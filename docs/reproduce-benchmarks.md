@@ -36,6 +36,35 @@ PYTHONPATH=src python benchmarks/benchmark_bed_reader.py \
 
 The A100 lab-host measurements and the corresponding public-main `pandas-plink` baseline are recorded in `results/benchmarks/bed_reader_parallel_remote_20260910.tsv`.
 
+### Native BED GPU pipeline
+
+The end-to-end benchmark keeps PLINK's packed two-bit calls through positional
+reads and H2D transfer, then decodes and runs exact covariate-adjusted OLS on
+the selected GPU. Run it separately for every candidate GPU because devices of
+the same model can have materially different host-to-device bandwidth through
+their PCIe switch and NUMA placement:
+
+```bash
+PYTHONPATH=src python benchmarks/benchmark_bed_gpu_pipeline.py \
+  --device cuda:0 \
+  --n-samples 22250 \
+  --n-variants 120000 \
+  --n-traits 128 \
+  --covariate-rank 27 \
+  --chunk-size 5000 \
+  --workers 24 \
+  --skip-p-values
+```
+
+`--skip-p-values` measures the scan core used by filtered streaming output.
+Without it, the benchmark also measures exact p-values for every marker-trait
+pair. Report both first-use time and the median repeated time. The first call
+includes TorchInductor compilation; every call includes pinned-memory
+registration, and the rings are then reused for all chunks in that scan. Use OS
+CPU/NUMA affinity controls when comparing GPUs, and do not add per-GPU
+bandwidths unless the links have been shown to operate concurrently without
+sharing a bottleneck.
+
 ## Calibrated stage runtime predictor
 
 The predictor separates compressed disk read, CPU Zstandard decode, host-to-device transfer, and GPU compute. The hardware model uses measured FP32 throughput, CPU frequency, decode thread count, and H2D bandwidth; `--pipeline-contention-factor` comes from a short joint-stage calibration and captures NUMA/PCIe contention.
@@ -59,6 +88,10 @@ PYTHONPATH=src python benchmarks/predict_runtime.py \
 ```
 
 Use measured sustained values for a new system. Peak vendor specifications alone do not capture filesystem cache state, PCIe topology, NUMA placement, or decode/H2D contention.
+For native packed BED input, pass `--h2d-bytes-per-value 0.25`; the GPU receives
+the on-disk two-bit calls and expands them after transfer. Measure
+`--h2d-gbps` on the exact selected GPU rather than reusing a value from another
+GPU of the same model.
 
 ## Toy multivariate case summary
 

@@ -6,6 +6,8 @@ import heapq
 from pathlib import Path
 
 import numpy as np
+import torch
+from scipy import special
 
 from .io import align_table_to_samples, load_array, load_genotype, load_vector, write_table
 from .linear import linear_scan, linear_scan_streaming, linear_scan_streaming_chunks
@@ -107,6 +109,7 @@ def _write_linear_table_streaming(
     topk_per_trait: int | None = None,
     p_value_threshold: float | None = None,
     variant_metadata: dict[str, np.ndarray] | None = None,
+    df: int | None = None,
 ) -> int:
     fieldnames = _linear_result_fieldnames(
         return_beta,
@@ -118,33 +121,49 @@ def _write_linear_table_streaming(
     trait_heaps: list[list[tuple[float, int, dict]]] | None = None
     if topk_per_trait is not None:
         trait_heaps = [[] for _ in trait_names]
+    critical_t = None
+    if p_value_threshold is not None:
+        if df is None:
+            raise ValueError("df is required for thresholded streaming output")
+        critical_t = abs(float(special.stdtrit(df, p_value_threshold / 2.0)))
     with gzip.open(path, "wt", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
         for start, end, beta_chunk, t_chunk, p_chunk in chunk_iterator:
-            logp_chunk = upper_tail_log10(p_chunk)
+            logp_chunk = None if p_chunk is None else upper_tail_log10(p_chunk)
             chunk_rows: list[dict] = []
             for trait_index, trait_name in enumerate(trait_names):
-                p_col = p_chunk[:, trait_index]
+                t_col = t_chunk[:, trait_index]
                 if p_value_threshold is not None:
-                    candidate_offsets = np.flatnonzero(p_col <= p_value_threshold)
+                    candidate_offsets = np.flatnonzero(np.abs(t_col) >= critical_t)
                     if candidate_offsets.size == 0:
                         continue
                 else:
-                    candidate_offsets = np.arange(p_col.shape[0])
+                    candidate_offsets = np.arange(t_col.shape[0])
                 if topk_per_trait is not None and candidate_offsets.size > topk_per_trait:
-                    candidate_scores = logp_chunk[candidate_offsets, trait_index]
+                    candidate_scores = np.abs(t_col[candidate_offsets])
                     keep_local = np.argpartition(candidate_scores, -topk_per_trait)[-topk_per_trait:]
                     candidate_offsets = candidate_offsets[keep_local]
-                for marker_offset in candidate_offsets.tolist():
+                if p_chunk is None:
+                    if df is None:
+                        raise ValueError("df is required when p-values are deferred")
+                    candidate_p = 2.0 * special.stdtr(
+                        df,
+                        -np.abs(t_col[candidate_offsets]),
+                    )
+                    candidate_logp = upper_tail_log10(candidate_p)
+                else:
+                    candidate_p = p_chunk[candidate_offsets, trait_index]
+                    candidate_logp = logp_chunk[candidate_offsets, trait_index]
+                for selected_index, marker_offset in enumerate(candidate_offsets.tolist()):
                     row = _make_linear_row(
                         marker_name=marker_names[start + marker_offset],
                         trait_name=trait_name,
                         n_samples=n_samples,
                         beta_value=float(beta_chunk[marker_offset, trait_index]),
                         t_value=float(t_chunk[marker_offset, trait_index]),
-                        p_value=float(p_col[marker_offset]),
-                        log10_p=float(logp_chunk[marker_offset, trait_index]),
+                        p_value=float(candidate_p[selected_index]),
+                        log10_p=float(candidate_logp[selected_index]),
                         return_beta=return_beta,
                         return_se=return_se,
                         return_t=return_t,
@@ -155,7 +174,7 @@ def _write_linear_table_streaming(
                         chunk_rows.append(row)
                         written += 1
                     else:
-                        score = row["-log10_p"]
+                        score = abs(float(t_col[marker_offset]))
                         heap = trait_heaps[trait_index]
                         if len(heap) < topk_per_trait:
                             heapq.heappush(heap, (score, start + marker_offset, row))
@@ -185,7 +204,7 @@ def run_linear_gwas(
     bim: str | Path | None = None,
     fam: str | Path | None = None,
     plink2_binary: str | Path | None = None,
-    reader_workers: int = 4,
+    reader_workers: int = 24,
     prefetch_chunks: int = 4,
     sample_id_column: str = "IID",
     sample_ids=None,
@@ -245,8 +264,18 @@ def run_linear_gwas(
     if p_value_threshold is not None and not (0.0 < p_value_threshold <= 1.0):
         raise ValueError("p_value_threshold must be in (0, 1]")
     if isinstance(genotype, ChunkedGenotype):
+        fused_bed_qc = (
+            resolved_device.type == "cuda"
+            and resolved_compute_dtype == "float32"
+            and hasattr(genotype, "iter_packed_chunks")
+        )
         effective_chunk_size = (
             chunk_size
+            or (
+                getattr(genotype, "preferred_gpu_chunk_size", None)
+                if fused_bed_qc
+                else None
+            )
             or getattr(genotype, "preferred_chunk_size", None)
             or min(genotype.shape[1], 4096)
             or 1
@@ -256,6 +285,7 @@ def run_linear_gwas(
             phenotype,
             covariates,
             genotype_chunk_size=effective_chunk_size,
+            validate_genotype=not fused_bed_qc,
         )
         marker_names = [f"marker_{i}" for i in range(genotype.shape[1])] if marker_ids is None else [str(v) for v in marker_ids[: genotype.shape[1]]]
         trait_names = trait_columns or [f"trait_{i}" for i in range(phenotype.shape[1])]
@@ -270,6 +300,7 @@ def run_linear_gwas(
                 compute_dtype=resolved_compute_dtype,
                 reader_workers=reader_workers,
                 prefetch_chunks=prefetch_chunks,
+                compute_p_values=topk_per_trait is None and p_value_threshold is None,
             )
             out = mkdir(output_dir)
             n_rows = _write_linear_table_streaming(
@@ -284,6 +315,7 @@ def run_linear_gwas(
                 topk_per_trait=topk_per_trait,
                 p_value_threshold=p_value_threshold,
                 variant_metadata=variant_metadata,
+                df=genotype_shape[0] - (0 if q_matrix is None else q_matrix.shape[1]) - 2,
             )
             table: list[dict] = []
             p_value = None
@@ -358,15 +390,26 @@ def run_linear_gwas(
                 table.append(row)
         n_rows = len(table)
 
+    analysis_chunk_size = int(
+        chunk_size
+        or (
+            getattr(genotype, "preferred_gpu_chunk_size", None)
+            if resolved_device.type == "cuda"
+            else None
+        )
+        or getattr(genotype, "preferred_chunk_size", None)
+        or min(genotype_shape[1], 4096)
+    )
     run_metadata = {
         "analysis": "linear",
-        "chunk_size": int(
-            chunk_size
-            or getattr(genotype, "preferred_chunk_size", None)
-            or min(genotype_shape[1], 4096)
-        ),
+        "chunk_size": analysis_chunk_size,
         "device_requested": device,
         "device_used": str(resolved_device),
+        "gpu_name": (
+            torch.cuda.get_device_name(resolved_device)
+            if resolved_device.type == "cuda"
+            else None
+        ),
         "compute_dtype_requested": compute_dtype,
         "compute_dtype_used": resolved_compute_dtype,
         "topk_per_trait": topk_per_trait,
@@ -412,7 +455,7 @@ def run_multivariate_gwas(
     bim: str | Path | None = None,
     fam: str | Path | None = None,
     plink2_binary: str | Path | None = None,
-    reader_workers: int = 4,
+    reader_workers: int = 24,
     prefetch_chunks: int = 4,
     sample_id_column: str = "IID",
     sample_ids=None,

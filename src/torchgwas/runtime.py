@@ -11,6 +11,7 @@ def predict_runtime(
     covariate_rank: int,
     chunk_size: int,
     decoded_bytes_per_value: float,
+    h2d_bytes_per_value: float | None = None,
     compression_ratio: float,
     disk_gbps: float,
     decode_gbps: float,
@@ -42,8 +43,11 @@ def predict_runtime(
             raise ValueError(f"{name} must be positive")
     if covariate_rank < 0:
         raise ValueError("covariate_rank must be nonnegative")
+    if h2d_bytes_per_value is None:
+        h2d_bytes_per_value = decoded_bytes_per_value
     for name, value in {
         "decoded_bytes_per_value": decoded_bytes_per_value,
+        "h2d_bytes_per_value": h2d_bytes_per_value,
         "compression_ratio": compression_ratio,
         "disk_gbps": disk_gbps,
         "decode_gbps": decode_gbps,
@@ -56,10 +60,11 @@ def predict_runtime(
 
     n_chunks = math.ceil(n_variants / chunk_size)
     decoded_bytes = float(n_variants * n_samples) * decoded_bytes_per_value
+    h2d_bytes = float(n_variants * n_samples) * h2d_bytes_per_value
     compressed_bytes = decoded_bytes / compression_ratio
     disk_seconds = compressed_bytes / (disk_gbps * 1e9)
     decode_seconds = decoded_bytes / (decode_gbps * 1e9)
-    h2d_seconds = decoded_bytes / (h2d_gbps * 1e9)
+    h2d_seconds = h2d_bytes / (h2d_gbps * 1e9)
     gemm_flops = 2.0 * n_variants * n_samples * (n_traits + covariate_rank)
     compute_seconds = gemm_flops / (measured_gemm_tflops * 1e12)
     compute_seconds += n_chunks * non_gemm_ms_per_chunk / 1000.0
@@ -86,6 +91,7 @@ def predict_runtime(
         "model": model,
         "n_chunks": n_chunks,
         "decoded_gb": decoded_bytes / 1e9,
+        "h2d_gb": h2d_bytes / 1e9,
         "compressed_gb": compressed_bytes / 1e9,
         "disk_seconds_isolated": disk_seconds,
         "decode_seconds_isolated": decode_seconds,
@@ -115,6 +121,7 @@ def predict_runtime_from_hardware(
     decode_thread_efficiency: float,
     disk_gbps: float,
     h2d_gbps: float,
+    h2d_bytes_per_value: float = 1.0,
     compression_ratio: float = 12.46,
     non_gemm_ms_per_chunk_per_gpu: float = 0.818,
     pipeline_contention_factor: float = 1.0,
@@ -159,6 +166,7 @@ def predict_runtime_from_hardware(
         covariate_rank=covariate_rank,
         chunk_size=chunk_size,
         decoded_bytes_per_value=1.0,
+        h2d_bytes_per_value=h2d_bytes_per_value,
         compression_ratio=compression_ratio,
         disk_gbps=disk_gbps,
         decode_gbps=decode_gbps,

@@ -15,6 +15,12 @@ def main() -> int:
     parser.add_argument("--covariate-rank", type=int, default=0)
     parser.add_argument("--chunk-size", type=int, default=2500)
     parser.add_argument("--decoded-bytes-per-value", type=float, default=1.0)
+    parser.add_argument(
+        "--h2d-bytes-per-value",
+        type=float,
+        default=None,
+        help="Bytes transferred per sample/variant; native BED uses 0.25",
+    )
     parser.add_argument("--compression-ratio", type=float, default=12.46)
     parser.add_argument("--disk-gbps", type=float, required=True)
     parser.add_argument("--decode-gbps", type=float, default=None)
@@ -51,6 +57,8 @@ def main() -> int:
         "setup_seconds": args.setup_seconds,
         "postprocess_seconds": args.postprocess_seconds,
     }
+    if args.h2d_bytes_per_value is not None:
+        common["h2d_bytes_per_value"] = args.h2d_bytes_per_value
     if args.model == "hardware":
         missing = [
             name

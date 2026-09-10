@@ -68,6 +68,25 @@ class RuntimeModelTestCase(unittest.TestCase):
                 joint_decode_chunks_per_second=5,
             )
 
+    def test_packed_bed_h2d_volume_is_one_quarter_byte_per_call(self):
+        result = predict_runtime(
+            n_variants=100,
+            n_samples=40,
+            n_traits=2,
+            covariate_rank=1,
+            chunk_size=20,
+            decoded_bytes_per_value=4,
+            h2d_bytes_per_value=0.25,
+            compression_ratio=1,
+            disk_gbps=1,
+            decode_gbps=1,
+            h2d_gbps=1,
+            measured_gemm_tflops=1,
+        )
+        self.assertEqual(result["decoded_gb"], 16_000 / 1e9)
+        self.assertEqual(result["h2d_gb"], 1_000 / 1e9)
+        self.assertEqual(result["h2d_seconds_isolated"], 1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

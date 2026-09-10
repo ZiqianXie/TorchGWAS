@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import queue
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +55,7 @@ class PlinkBedGenotype:
     """
 
     ndim = 2
+    preferred_gpu_chunk_size = 5000
 
     def __init__(
         self,
@@ -177,3 +180,106 @@ class PlinkBedGenotype:
             prefetch_chunks=self.prefetch_chunks if prefetch_chunks is None else prefetch_chunks,
             reader_workers=self.reader_workers if reader_workers is None else reader_workers,
         )
+
+    def iter_packed_chunks(
+        self,
+        chunk_size: int | None = None,
+        reader_workers: int | None = None,
+        depth: int | None = None,
+    ) -> "PinnedPackedBedLoader":
+        workers = self.reader_workers if reader_workers is None else int(reader_workers)
+        chunk = self.preferred_gpu_chunk_size if chunk_size is None else int(chunk_size)
+        ring_depth = max(3, workers + 2) if depth is None else int(depth)
+        return PinnedPackedBedLoader(self, chunk, workers, ring_depth)
+
+
+class PinnedPackedBedLoader:
+    """Ordered BED reads into pinned buffers without CPU genotype decoding."""
+
+    def __init__(
+        self,
+        genotype: PlinkBedGenotype,
+        chunk_size: int,
+        reader_workers: int,
+        depth: int,
+    ) -> None:
+        import torch
+
+        if chunk_size <= 0 or reader_workers <= 0 or depth <= 0:
+            raise ValueError("chunk_size, reader_workers, and depth must be positive")
+        self.genotype = genotype
+        self.chunk_size = int(chunk_size)
+        self.reader_workers = int(reader_workers)
+        self.depth = int(depth)
+        self.buffers = [
+            torch.empty(
+                (self.chunk_size, genotype._bytes_per_variant),
+                dtype=torch.uint8,
+                pin_memory=True,
+            )
+            for _ in range(self.depth)
+        ]
+        self.free: queue.Queue[int] = queue.Queue()
+        for index in range(self.depth):
+            self.free.put(index)
+        self._pool = ThreadPoolExecutor(
+            max_workers=self.reader_workers,
+            thread_name_prefix="torchgwas-bed-packed",
+        )
+
+    def _fill(self, buffer_index: int, start: int, end: int):
+        count = end - start
+        byte_count = count * self.genotype._bytes_per_variant
+        target = memoryview(self.buffers[buffer_index].numpy()).cast("B")[:byte_count]
+        offset = 3 + start * self.genotype._bytes_per_variant
+        received = 0
+        while received < byte_count:
+            amount = os.preadv(
+                self.genotype._fd,
+                [target[received:]],
+                offset + received,
+            )
+            if amount == 0:
+                raise OSError(
+                    f"unexpected EOF in {self.genotype.bed_path} at byte {offset + received}"
+                )
+            received += amount
+        return buffer_index, start, end
+
+    def __iter__(self):
+        bounds = [
+            (start, min(self.genotype._n_markers, start + self.chunk_size))
+            for start in range(0, self.genotype._n_markers, self.chunk_size)
+        ]
+        pending: dict[int, Future] = {}
+        submit_index = 0
+
+        def submit_one() -> None:
+            nonlocal submit_index
+            buffer_index = self.free.get()
+            start, end = bounds[submit_index]
+            pending[submit_index] = self._pool.submit(
+                self._fill,
+                buffer_index,
+                start,
+                end,
+            )
+            submit_index += 1
+
+        while submit_index < min(len(bounds), self.depth):
+            submit_one()
+        try:
+            for output_index in range(len(bounds)):
+                buffer_index, start, end = pending.pop(output_index).result()
+                yield buffer_index, self.buffers[buffer_index], start, end
+                if submit_index < len(bounds):
+                    submit_one()
+        finally:
+            for future in pending.values():
+                future.cancel()
+
+    def release(self, buffer_index: int) -> None:
+        self.free.put(buffer_index)
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=True, cancel_futures=True)

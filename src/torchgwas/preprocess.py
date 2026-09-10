@@ -58,6 +58,7 @@ def prepare_inputs_for_prep(
     phenotype: np.ndarray,
     covariates: np.ndarray | None = None,
     genotype_chunk_size: int | None = None,
+    validate_genotype: bool = True,
 ) -> tuple[np.ndarray, np.ndarray | None, dict]:
     if not hasattr(genotype, "shape") or len(genotype.shape) != 2:
         raise ValueError(f"genotype must be 2D, got {getattr(genotype, 'shape', None)}")
@@ -77,12 +78,20 @@ def prepare_inputs_for_prep(
         or min(genotype.shape[1], 4096)
         or 1
     )
-    geno_mask = _chunked_genotype_std_mask(genotype, chunk_size=effective_chunk_size)
-    if not geno_mask.all():
-        raise ValueError(
-            f"out-of-core genotype contains {(~geno_mask).sum()} zero-variance variants; "
-            "filter invariant variants before running TorchGWAS"
-        )
+    if validate_genotype:
+        geno_mask = _chunked_genotype_std_mask(genotype, chunk_size=effective_chunk_size)
+        if not geno_mask.all():
+            raise ValueError(
+                f"out-of-core genotype contains {(~geno_mask).sum()} zero-variance variants; "
+                "filter invariant variants before running TorchGWAS"
+            )
+        genotype_qc_mode = "chunked"
+    else:
+        # The native packed-BED CUDA iterator performs these checks while the
+        # association scan is already resident on the GPU. This avoids a full
+        # CPU decode and a second read of the input before the real scan.
+        geno_mask = np.ones(genotype.shape[1], dtype=bool)
+        genotype_qc_mode = "fused_gpu_scan"
     pheno_mask = column_std_mask(phenotype)
     if covariates is not None:
         covar_mask = column_std_mask(covariates)
@@ -101,7 +110,7 @@ def prepare_inputs_for_prep(
         "dropped_phenotype_columns": int((~pheno_mask).sum()),
         "dropped_covariate_columns": int(0 if covariates is None else (~covar_mask).sum()),
         "n_samples": int(genotype.shape[0]),
-        "genotype_qc_mode": "chunked",
+        "genotype_qc_mode": genotype_qc_mode,
         "genotype_qc_chunk_size": int(effective_chunk_size),
     }
 

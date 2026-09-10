@@ -120,6 +120,11 @@ torchgwas linear \
 
 When the linear workflow uses a disk-backed genotype together with `--output-dir`, TorchGWAS streams genotype chunks from disk and writes `results.tsv.gz` incrementally instead of materializing the full result table in memory.
 For this large-scale path, `compute-dtype=auto` resolves to `float32` by default.
+For native PLINK BED on CUDA, the two-bit calls remain packed through the
+positional read and host-to-device transfer, then are decoded on the GPU. The
+reader uses independent ordered chunk reads, pinned buffer reuse, and separate
+copy/compute streams. GPU indices are not interchangeable: benchmark the
+selected device because PCIe and NUMA topology can change its H2D bandwidth.
 
 ## Documentation
 
