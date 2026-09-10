@@ -1,0 +1,54 @@
+{
+  "bed": "/data/zxie3/torchgwas_bed_benchmark/discovery_hardcall/T1_discovery_hardcall.bed",
+  "bed_bytes": 44982979866,
+  "chunk_size": 5000,
+  "measurements": [
+    {
+      "cache_eviction_requested": true,
+      "read_checksum": 10453001,
+      "read_packed_gbps": 0.5544548968656153,
+      "read_pinned_setup_seconds": 1.4248997969552875,
+      "read_wall_seconds": 81.13009753776714,
+      "repeat": 1,
+      "workers": 1
+    },
+    {
+      "cache_eviction_requested": true,
+      "read_checksum": 10453001,
+      "read_packed_gbps": 1.638486642406651,
+      "read_pinned_setup_seconds": 0.15157743310555816,
+      "read_wall_seconds": 27.453980214893818,
+      "repeat": 1,
+      "workers": 4
+    },
+    {
+      "cache_eviction_requested": true,
+      "read_checksum": 10453001,
+      "read_packed_gbps": 1.5368131152216278,
+      "read_pinned_setup_seconds": 0.21147590968757868,
+      "read_wall_seconds": 29.270299308001995,
+      "repeat": 1,
+      "workers": 8
+    },
+    {
+      "cache_eviction_requested": true,
+      "read_checksum": 10453001,
+      "read_packed_gbps": 1.470172069731274,
+      "read_pinned_setup_seconds": 0.2569876522757113,
+      "read_wall_seconds": 30.597085054963827,
+      "repeat": 1,
+      "workers": 12
+    },
+    {
+      "cache_eviction_requested": true,
+      "read_checksum": 10453001,
+      "read_packed_gbps": 1.5163348595139523,
+      "read_pinned_setup_seconds": 0.8075731289573014,
+      "read_wall_seconds": 29.665597661864012,
+      "repeat": 1,
+      "workers": 24
+    }
+  ],
+  "n_samples": 22250,
+  "n_variants": 8086101
+}

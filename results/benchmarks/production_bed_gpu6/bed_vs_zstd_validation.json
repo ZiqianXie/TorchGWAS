@@ -1,0 +1,18 @@
+{
+  "bed": "/data/zxie3/torchgwas_bed_benchmark/discovery_hardcall/T1_discovery_hardcall.bed",
+  "bed_bytes": 44982979866,
+  "hard_call_mismatches": 0,
+  "hard_calls_checked": 155750,
+  "n_samples": 22250,
+  "n_variants": 8086101,
+  "source_store": "/data/zxie3/GWAS/zs_l15",
+  "variant_indices_checked": [
+    0,
+    1,
+    2499,
+    2500,
+    4043050,
+    8086099,
+    8086100
+  ]
+}

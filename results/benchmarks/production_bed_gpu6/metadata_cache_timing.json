@@ -1,0 +1,8 @@
+{
+  "cache_build_seconds": 4.288327073212713,
+  "cache_bytes": 614544521,
+  "cached_bed_metadata_init_seconds": 0.06972203077748418,
+  "n_samples": 22250,
+  "n_variants": 8086101,
+  "storage": "node-local /data"
+}

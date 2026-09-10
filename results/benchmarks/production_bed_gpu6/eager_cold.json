@@ -1,0 +1,60 @@
+{
+  "bed": "/data/zxie3/torchgwas_bed_benchmark/discovery_hardcall/T1_discovery_hardcall.bed",
+  "chunk_size": 5000,
+  "client_cache_eviction_requested": false,
+  "cold_read": null,
+  "cold_scan_repeats": true,
+  "compute_p_values": false,
+  "covariate_columns": 27,
+  "device": "cuda:0",
+  "execution_mode": "eager",
+  "first_scan": {
+    "first_result_seconds": 4.002528578974307,
+    "peak_gpu_allocated_gb": 1.273529344,
+    "retained_t_numpy_bytes": 0,
+    "scan_checksum": 13089616136.365416,
+    "scan_decoded_gbps": 28.093312662660527,
+    "scan_packed_gbps": 1.7559898690155114,
+    "scan_variants_per_second": 315655.19845685986,
+    "scan_wall_seconds": 25.616878922097385
+  },
+  "gpu_name": "NVIDIA A100-SXM4-80GB",
+  "h2d_gbps": 20.104550212673207,
+  "metadata_cache_path": "/data/zxie3/torchgwas_bed_benchmark/discovery_hardcall/metadata_cache/T1_discovery_hardcall_53a1c06139ef.bim.cache",
+  "n_samples": 22250,
+  "n_traits": 128,
+  "n_variants": 8086101,
+  "repeat_cache_eviction_requested": [
+    true
+  ],
+  "retain_t_array": false,
+  "scan_exclusion_counts": {
+    "invariant": 0,
+    "missing": 0
+  },
+  "steady_scan_median": {
+    "first_result_seconds": 1.9217050047591329,
+    "peak_gpu_allocated_gb": 1.274315264,
+    "retained_t_numpy_bytes": 0,
+    "scan_checksum": 13089616136.365416,
+    "scan_decoded_gbps": 19.900352596223964,
+    "scan_packed_gbps": 1.2438838369976846,
+    "scan_variants_per_second": 223599.46737330296,
+    "scan_wall_seconds": 36.16332854004577
+  },
+  "steady_scan_repeats": [
+    {
+      "first_result_seconds": 1.9217050047591329,
+      "peak_gpu_allocated_gb": 1.274315264,
+      "retained_t_numpy_bytes": 0,
+      "scan_checksum": 13089616136.365416,
+      "scan_decoded_gbps": 19.900352596223964,
+      "scan_packed_gbps": 1.2438838369976846,
+      "scan_variants_per_second": 223599.46737330296,
+      "scan_wall_seconds": 36.16332854004577
+    }
+  ],
+  "tf32_matmul_allowed": false,
+  "warm_read": null,
+  "workers": 4
+}

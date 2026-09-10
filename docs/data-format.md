@@ -10,6 +10,17 @@
 - encoding: numeric dosage or hard-call counts
 
 PLINK BED is read directly in variant-major order. The effect allele is BIM A2.
+For very large BIM files, `--genotype-cache-dir` stores validated fixed-width
+NumPy metadata arrays and reopens them read-only with memory mapping. The cache
+key includes the resolved BIM path, size, modification time, and schema; the
+text BIM remains authoritative.
+When `--sample-ids` is supplied, FAM IIDs are subset and reordered to match that
+vector without rewriting the BED. On the packed CUDA path, variants with a
+missing two-bit call in any selected sample and variants with zero residual
+variance are omitted from the result table; exclusion counts are written to
+`qc.json`. A hard-called BED can still contain PLINK's missing (`01`) state, so
+the strict any-missing policy may require users to prepare a complete-data BED
+before analysis.
 
 BGEN is converted once into TorchGWAS's variant-major zstd dosage-store representation:
 
@@ -39,8 +50,10 @@ The `.complete.json` sidecar records the dosage scale and exclusion counts. Valu
 
 ## Alignment
 
-When genotype is loaded from PLINK/BGEN, TorchGWAS uses genotype sample order as the source of truth.
+When genotype is loaded from PLINK/BGEN, TorchGWAS uses genotype sample order as the source of truth by default.
 Phenotype and covariate tables are reordered to that sample order via `IID`.
+An explicit PLINK `--sample-ids` vector instead defines the analysis order and
+must contain unique IIDs present in the FAM file.
 
 ## Outputs
 

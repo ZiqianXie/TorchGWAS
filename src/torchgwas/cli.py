@@ -4,9 +4,11 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
+
 from .api import run_linear_gwas, run_multivariate_gwas
 from .datasets import get_toy_dataset_paths
-from .io import align_table_to_samples, load_array, load_genotype
+from .io import align_table_to_samples, load_array, load_genotype, load_vector
 from .preprocess import prepare_inputs_for_prep, residualize_and_standardize
 from .streaming import ChunkedGenotype
 from .utils import mkdir, write_json
@@ -97,12 +99,25 @@ def _run_prep(args) -> int:
         reader_workers=args.reader_workers,
         prefetch_chunks=args.prefetch_chunks,
     )
-    if sample_ids is None and args.sample_ids is not None:
-        sample_ids = load_array(args.sample_ids) if str(args.sample_ids).endswith(".npy") else None
-        if sample_ids is None:
-            from .io import load_vector
-
-            sample_ids = load_vector(args.sample_ids)
+    if args.sample_ids is not None:
+        requested_sample_ids = (
+            load_array(args.sample_ids)
+            if str(args.sample_ids).lower().endswith(".npy")
+            else load_vector(args.sample_ids)
+        )
+        if isinstance(genotype, ChunkedGenotype) and hasattr(genotype, "select_samples"):
+            genotype.select_samples(requested_sample_ids)
+            sample_ids = genotype.sample_ids
+        elif sample_ids is None:
+            sample_ids = requested_sample_ids
+        elif not np.array_equal(
+            np.asarray(sample_ids, dtype=str),
+            np.asarray(requested_sample_ids, dtype=str),
+        ):
+            raise ValueError(
+                f"{type(genotype).__name__} does not support sample subsetting; "
+                "pre-align or convert the genotype input first"
+            )
     trait_columns = None if args.trait_columns is None else [token.strip() for token in args.trait_columns.split(",") if token.strip()]
     covariate_columns = None if args.covariate_columns is None else [token.strip() for token in args.covariate_columns.split(",") if token.strip()]
     if args.phenotype_table is not None:
@@ -126,8 +141,6 @@ def _run_prep(args) -> int:
     )
     pheno_proc, q_matrix = residualize_and_standardize(phenotype, covariates)
     out = mkdir(args.output_dir)
-    import numpy as np
-
     np.save(out / "phenotype_processed.npy", pheno_proc)
     if q_matrix is not None:
         np.save(out / "covariate_q.npy", q_matrix)

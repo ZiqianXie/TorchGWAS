@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+import threading
 from collections.abc import Iterator
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -27,16 +29,24 @@ def _two_sided_t_pvalue(t_stat: np.ndarray, df: int) -> np.ndarray:
     return 2.0 * special.stdtr(df, -np.abs(t_stat))
 
 
-def _unpack_plink_a2_float(packed: torch.Tensor, n_samples: int) -> torch.Tensor:
-    calls = torch.stack(
-        (
-            packed & 3,
-            (packed >> 2) & 3,
-            (packed >> 4) & 3,
-            (packed >> 6) & 3,
-        ),
-        dim=2,
-    ).reshape(packed.shape[0], -1)[:, :n_samples]
+def _unpack_plink_a2_float(
+    packed: torch.Tensor,
+    n_samples: int,
+    sample_byte_indices: torch.Tensor | None = None,
+    sample_bit_shifts: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if sample_byte_indices is None:
+        calls = torch.stack(
+            (
+                packed & 3,
+                (packed >> 2) & 3,
+                (packed >> 4) & 3,
+                (packed >> 6) & 3,
+            ),
+            dim=2,
+        ).reshape(packed.shape[0], -1)[:, :n_samples]
+    else:
+        calls = (packed[:, sample_byte_indices] >> sample_bit_shifts[None, :]) & 3
     dosage = (2 - ((calls + 1) >> 1)).to(torch.float32)
     return torch.where(calls == 1, torch.nan, dosage)
 
@@ -48,8 +58,15 @@ def _packed_bed_statistics(
     n_samples: int,
     n_traits: int,
     df: int,
+    sample_byte_indices: torch.Tensor | None,
+    sample_bit_shifts: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    genotype = _unpack_plink_a2_float(packed, n_samples)
+    genotype = _unpack_plink_a2_float(
+        packed,
+        n_samples,
+        sample_byte_indices,
+        sample_bit_shifts,
+    )
     products = genotype @ design
     gy = products[:, :n_traits]
     gc = products[:, n_traits:]
@@ -120,6 +137,22 @@ def _packed_bed_cuda_iterator(
         covariate_t = torch.cat((intercept_t, q_t), dim=1)
     design_t = torch.cat((phenotype_t, covariate_t), dim=1)
     phenotype_ss_t = torch.sum(phenotype_t * phenotype_t, dim=0)
+    selected_samples = getattr(genotype, "_sample_indices", None)
+    if selected_samples is None:
+        sample_byte_indices_t = None
+        sample_bit_shifts_t = None
+    else:
+        selected_samples = np.asarray(selected_samples, dtype=np.int64)
+        sample_byte_indices_t = torch.as_tensor(
+            selected_samples // 4,
+            dtype=torch.int64,
+            device=torch_device,
+        )
+        sample_bit_shifts_t = torch.as_tensor(
+            (selected_samples % 4) * 2,
+            dtype=torch.uint8,
+            device=torch_device,
+        )
 
     packed_device = [
         torch.empty((chunk_size, bytes_per_variant), dtype=torch.uint8, device=torch_device)
@@ -130,9 +163,22 @@ def _packed_bed_cuda_iterator(
     copy_done = [torch.cuda.Event() for _ in packed_device]
     copy_stream = torch.cuda.Stream(device=torch_device)
     result_stream = torch.cuda.Stream(device=torch_device)
-    # Keep several result slots so CPU Student-t tails can run in parallel while
-    # the next BED chunks are read and scanned on the GPU.
-    result_depth = max(2, min(8, workers))
+    # BED reading and Student-t evaluation have different scaling curves.  A
+    # local NVMe device is often saturated by 4 readers, while exact tails can
+    # still use many CPU cores.  Size the result ring independently, but cap its
+    # pinned-memory footprint because a high-trait scan has much larger slots.
+    if hasattr(os, "sched_getaffinity"):
+        available_cpus = len(os.sched_getaffinity(0))
+    else:
+        available_cpus = os.cpu_count() or 1
+    pvalue_workers = (
+        max(1, min(24, available_cpus))
+        if compute_p_values
+        else max(1, min(8, workers))
+    )
+    result_slot_bytes = chunk_size * (n_traits * 2 * 4 + 1)
+    max_slots_by_memory = max(2, (1 << 30) // max(1, result_slot_bytes))
+    result_depth = max(2, min(pvalue_workers, max_slots_by_memory))
     beta_host = [
         torch.empty((chunk_size, n_traits), dtype=torch.float32, pin_memory=True)
         for _ in range(result_depth)
@@ -156,6 +202,8 @@ def _packed_bed_cuda_iterator(
             n_samples,
             n_traits,
             df,
+            sample_byte_indices_t,
+            sample_bit_shifts_t,
         )
         (warm_beta.sum() + warm_t.sum() + warm_status.sum()).item()
     except Exception:
@@ -168,31 +216,29 @@ def _packed_bed_cuda_iterator(
         depth=depth,
     )
     pvalue_pool = ThreadPoolExecutor(
-        max_workers=max(1, min(8, workers)),
+        max_workers=result_depth,
         thread_name_prefix="torchgwas-pvalue",
     )
     pending: deque[Future] = deque()
+    exclusion_lock = threading.Lock()
+    genotype._last_scan_exclusion_counts = {"missing": 0, "invariant": 0}
 
     def finish_result(result_slot: int, start: int, end: int):
         result_done[result_slot].synchronize()
         count = end - start
         status_chunk = status_host[result_slot][:count].numpy()
-        missing = np.flatnonzero(status_chunk == 1)
-        if missing.size:
-            marker = start + int(missing[0])
-            raise ValueError(
-                f"genotype contains missing/non-finite values at marker {marker}; "
-                "v0.1 requires complete matrices"
-            )
-        invariant = np.flatnonzero(status_chunk == 2)
-        if invariant.size:
-            marker = start + int(invariant[0])
-            raise ValueError(
-                f"out-of-core genotype contains a zero-variance variant at marker {marker}; "
-                "filter invariant variants before running TorchGWAS"
-            )
+        n_missing = int(np.count_nonzero(status_chunk == 1))
+        n_invariant = int(np.count_nonzero(status_chunk == 2))
+        if n_missing or n_invariant:
+            with exclusion_lock:
+                genotype._last_scan_exclusion_counts["missing"] += n_missing
+                genotype._last_scan_exclusion_counts["invariant"] += n_invariant
         beta_chunk = beta_host[result_slot][:count].numpy()
         t_chunk = t_host[result_slot][:count].numpy()
+        invalid = status_chunk != 0
+        if np.any(invalid):
+            beta_chunk[invalid, :] = np.nan
+            t_chunk[invalid, :] = np.nan
         p_chunk = _two_sided_t_pvalue(t_chunk, df=df) if compute_p_values else None
         return start, end, beta_chunk, t_chunk, p_chunk
 
@@ -218,6 +264,8 @@ def _packed_bed_cuda_iterator(
                 n_samples,
                 n_traits,
                 df,
+                sample_byte_indices_t,
+                sample_bit_shifts_t,
             )
             compute_done[device_slot].record(compute_stream)
 

@@ -111,6 +111,7 @@ def measure_scan(
     workers: int,
     device: torch.device,
     compute_p_values: bool,
+    retain_t_array: bool = False,
 ) -> dict:
     torch.cuda.reset_peak_memory_stats(device)
     started = time.perf_counter()
@@ -126,10 +127,17 @@ def measure_scan(
     )
     checksum = 0.0
     first_result_seconds = None
+    t_output = (
+        np.empty((genotype.shape[1], phenotype.shape[1]), dtype=np.float32)
+        if retain_t_array
+        else None
+    )
     for start, end, beta, t_stat, p_value in chunks:
         if first_result_seconds is None:
             first_result_seconds = time.perf_counter() - started
         checksum += float(beta[0, 0] + t_stat[-1, -1])
+        if t_output is not None:
+            t_output[start:end] = t_stat
         if p_value is not None:
             checksum += float(p_value[0, -1])
         checksum += start + end
@@ -147,6 +155,7 @@ def measure_scan(
         ),
         "peak_gpu_allocated_gb": torch.cuda.max_memory_allocated(device) / 1e9,
         "scan_checksum": checksum,
+        "retained_t_numpy_bytes": 0 if t_output is None else int(t_output.nbytes),
     }
 
 

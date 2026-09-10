@@ -5,6 +5,7 @@ import gzip
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -14,6 +15,7 @@ from torchgwas.api import run_linear_gwas
 from torchgwas.bed import PlinkBedGenotype, resolve_plink_triplet
 from torchgwas.linear import _unpack_plink_a2_float, linear_scan, linear_scan_streaming
 from torchgwas.preprocess import residualize_and_standardize
+from torchgwas.utils import choose_device
 
 
 def _write_bed(prefix: Path, dosage_a2: np.ndarray) -> Path:
@@ -40,6 +42,12 @@ def _write_bed(prefix: Path, dosage_a2: np.ndarray) -> Path:
 
 
 class ExactLinearStatisticsTestCase(unittest.TestCase):
+    def test_auto_cuda_device_is_resolved_to_an_explicit_index(self):
+        with mock.patch("torch.cuda.is_available", return_value=True), mock.patch(
+            "torch.cuda.current_device", return_value=3
+        ):
+            self.assertEqual(choose_device("auto"), torch.device("cuda:3"))
+
     def test_packed_plink_decoder_preserves_a2_dosage_and_missing_calls(self):
         # PLINK pairs are least-significant first: 00, 10, 11, 01.
         packed = torch.tensor([[0b01_11_10_00]], dtype=torch.uint8)
@@ -51,6 +59,21 @@ class ExactLinearStatisticsTestCase(unittest.TestCase):
         packed = torch.tensor([[0b11_11_10_00]], dtype=torch.uint8)
         observed = _unpack_plink_a2_float(packed, n_samples=2).numpy()
         np.testing.assert_array_equal(observed, np.asarray([[2.0, 1.0]], dtype=np.float32))
+
+    def test_packed_plink_decoder_gathers_arbitrary_sample_positions(self):
+        packed = torch.tensor(
+            [[0b01_11_10_00, 0b11_00_10_00]],
+            dtype=torch.uint8,
+        )
+        sample_indices = torch.tensor([7, 0, 5, 2], dtype=torch.int64)
+        observed = _unpack_plink_a2_float(
+            packed,
+            n_samples=4,
+            sample_byte_indices=sample_indices // 4,
+            sample_bit_shifts=((sample_indices % 4) * 2).to(torch.uint8),
+        ).numpy()
+        expected = np.asarray([[0.0, 2.0, 1.0, 0.0]], dtype=np.float32)
+        np.testing.assert_array_equal(observed, expected)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the packed BED scan")
     def test_packed_bed_cuda_scan_matches_float64_reference(self):
@@ -120,7 +143,62 @@ class ExactLinearStatisticsTestCase(unittest.TestCase):
             self.assertEqual(observed, expected)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the packed BED scan")
-    def test_packed_bed_cuda_scan_rejects_missing_calls(self):
+    def test_packed_bed_cuda_subset_matches_float64_reference(self):
+        rng = np.random.default_rng(20260913)
+        n_stored_samples = 65
+        selected_indices = np.asarray([64, 0, 31, 7, 42, 18, 3, 55, 12, 27, 9, 38])
+        genotype = rng.integers(0, 3, size=(n_stored_samples, 11), dtype=np.uint8)
+        genotype[selected_indices[:3], :] = np.arange(3, dtype=np.uint8)[:, None]
+        selected_genotype = genotype[selected_indices]
+        covariates = rng.normal(size=(selected_indices.size, 2))
+        phenotype = np.column_stack(
+            (
+                0.4 * selected_genotype[:, 2] + rng.normal(size=selected_indices.size),
+                -0.3 * selected_genotype[:, 8] + rng.normal(size=selected_indices.size),
+            )
+        )
+        beta_ref, t_ref, p_ref, _ = linear_scan(
+            selected_genotype.astype(np.float64),
+            phenotype,
+            covariates,
+            chunk_size=4,
+            device="cpu",
+            compute_dtype="float64",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bed = _write_bed(Path(tmpdir) / "subset", genotype)
+            packed = PlinkBedGenotype(bed, reader_workers=2, prefetch_chunks=2)
+            packed.select_samples([f"I{index}" for index in selected_indices])
+            beta, t_stat, p_value, _ = linear_scan_streaming(
+                packed,
+                phenotype,
+                covariates,
+                chunk_size=4,
+                device="cuda:0",
+                compute_dtype="float32",
+                reader_workers=2,
+            )
+            api_result = run_linear_gwas(
+                genotype=bed,
+                phenotype=phenotype,
+                covariates=covariates,
+                genotype_format="plink",
+                sample_ids=np.asarray([f"I{index}" for index in selected_indices]),
+                chunk_size=4,
+                device="cuda:0",
+                compute_dtype="float32",
+                reader_workers=2,
+            )
+
+        np.testing.assert_allclose(beta, beta_ref, rtol=3e-4, atol=3e-5)
+        np.testing.assert_allclose(t_stat, t_ref, rtol=3e-4, atol=3e-5)
+        np.testing.assert_allclose(p_value, p_ref, rtol=3e-4, atol=1e-7)
+        api_t = np.asarray([row["t_stat"] for row in api_result.table]).reshape(t_ref.shape)
+        np.testing.assert_allclose(api_t, t_ref, rtol=3e-4, atol=3e-5)
+        self.assertEqual(api_result.run_metadata["genotype_shape"], [selected_indices.size, 11])
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the packed BED scan")
+    def test_packed_bed_cuda_scan_skips_missing_variants(self):
         rng = np.random.default_rng(20260912)
         genotype = rng.integers(0, 3, size=(65, 13)).astype(np.float32)
         genotype[:3, :] = np.arange(3, dtype=np.float32)[:, None]
@@ -130,16 +208,20 @@ class ExactLinearStatisticsTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bed = _write_bed(Path(tmpdir) / "missing", genotype)
             packed = PlinkBedGenotype(bed, reader_workers=2, prefetch_chunks=2)
-            with self.assertRaisesRegex(ValueError, "marker 3"):
-                linear_scan_streaming(
-                    packed,
-                    phenotype,
-                    covariates,
-                    chunk_size=5,
-                    device="cuda:0",
-                    compute_dtype="float32",
-                    reader_workers=2,
-                )
+            beta, t_stat, p_value, _ = linear_scan_streaming(
+                packed,
+                phenotype,
+                covariates,
+                chunk_size=5,
+                device="cuda:0",
+                compute_dtype="float32",
+                reader_workers=2,
+            )
+            self.assertTrue(np.isnan(beta[3]).all())
+            self.assertTrue(np.isnan(t_stat[3]).all())
+            self.assertTrue(np.isnan(p_value[3]).all())
+            self.assertTrue(np.isfinite(t_stat[np.arange(t_stat.shape[0]) != 3]).all())
+            self.assertEqual(packed._last_scan_exclusion_counts, {"missing": 1, "invariant": 0})
 
     def test_matches_explicit_ols_with_rank_deficient_covariates(self):
         rng = np.random.default_rng(20260910)

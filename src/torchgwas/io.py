@@ -158,6 +158,7 @@ def load_plink_genotype(
     fam: str | Path | None = None,
     reader_workers: int = 4,
     prefetch_chunks: int = 4,
+    metadata_cache_dir: str | Path | None = None,
 ) -> tuple[PlinkBedGenotype, np.ndarray, np.ndarray]:
     genotype = PlinkBedGenotype(
         genotype_path,
@@ -165,6 +166,7 @@ def load_plink_genotype(
         fam=fam,
         reader_workers=reader_workers,
         prefetch_chunks=prefetch_chunks,
+        metadata_cache_dir=metadata_cache_dir,
     )
     return genotype, genotype.sample_ids, genotype.marker_ids
 
@@ -293,6 +295,7 @@ def load_genotype(
             fam=fam,
             reader_workers=reader_workers,
             prefetch_chunks=prefetch_chunks,
+            metadata_cache_dir=genotype_cache_dir,
         )
         return genotype, sample_ids, marker_ids, {
             "genotype_format": "plink",
@@ -300,6 +303,11 @@ def load_genotype(
             "reader_workers": int(reader_workers),
             "prefetch_chunks": int(prefetch_chunks),
             "effect_allele": "BIM_A2",
+            "metadata_cache_path": (
+                None
+                if genotype.metadata_cache_path is None
+                else str(genotype.metadata_cache_path)
+            ),
         }
     if resolved_format == "bgen":
         genotype, sample_ids, marker_ids = load_bgen_genotype(

@@ -65,6 +65,66 @@ class BedReaderTestCase(unittest.TestCase):
             self.assertEqual(genotype.marker_ids.tolist(), ["rs0", "rs1", "rs2"])
             self.assertEqual(genotype.effect_alleles.tolist(), ["C0", "C1", "C2"])
 
+    def test_binary_bim_cache_avoids_reparsing_large_metadata(self):
+        expected = np.asarray([[2, 0, 1], [1, 1, 0]], dtype=np.float32)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bed, _, _ = _write_plink_triplet(root / "cached", expected)
+            cache_dir = root / "metadata-cache"
+            first = PlinkBedGenotype(bed, metadata_cache_dir=cache_dir)
+            cache_path = first.metadata_cache_path
+            self.assertTrue(cache_path.is_dir())
+            self.assertTrue((cache_path / "manifest.json").is_file())
+
+            original_read_csv = __import__("pandas").read_csv
+
+            def reject_bim_parse(path, *args, **kwargs):
+                if Path(path).suffix == ".bim":
+                    raise AssertionError("BIM text should not be parsed when cache is valid")
+                return original_read_csv(path, *args, **kwargs)
+
+            with mock.patch("torchgwas.bed.pd.read_csv", side_effect=reject_bim_parse):
+                second = PlinkBedGenotype(bed, metadata_cache_dir=cache_dir)
+
+            self.assertEqual(second.marker_ids.tolist(), first.marker_ids.tolist())
+            np.testing.assert_array_equal(second.positions, first.positions)
+
+    def test_select_samples_decodes_in_requested_iid_order(self):
+        expected = np.asarray(
+            [
+                [2, 0, 1],
+                [1, 1, 0],
+                [0, 2, 2],
+                [2, 1, 2],
+                [1, 0, 1],
+                [0, 2, 0],
+            ],
+            dtype=np.float32,
+        )
+        selected_indices = np.asarray([5, 0, 3, 1])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bed, _, _ = _write_plink_triplet(Path(tmpdir) / "subset", expected)
+            genotype = PlinkBedGenotype(bed).select_samples(
+                [f"I{index}" for index in selected_indices]
+            )
+            observed = genotype.read_chunk(0, expected.shape[1])
+
+        self.assertEqual(genotype.shape, (selected_indices.size, expected.shape[1]))
+        self.assertEqual(genotype.sample_ids.tolist(), ["I5", "I0", "I3", "I1"])
+        np.testing.assert_array_equal(observed, expected[selected_indices])
+
+    def test_select_samples_rejects_missing_and_duplicate_iids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bed, _, _ = _write_plink_triplet(
+                Path(tmpdir) / "subset-errors",
+                np.ones((6, 2), dtype=np.float32),
+            )
+            genotype = PlinkBedGenotype(bed)
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                genotype.select_samples(["I0", "I0"])
+            with self.assertRaisesRegex(ValueError, "absent"):
+                genotype.select_samples(["I0", "not-present"])
+
     def test_dotted_prefix_is_not_truncated(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             prefix = Path(tmpdir) / "study.v1"

@@ -1,0 +1,75 @@
+{
+  "bed": "/data/zxie3/torchgwas_bed_benchmark/discovery_hardcall/T1_discovery_hardcall.bed",
+  "chunk_size": 5000,
+  "client_cache_eviction_requested": false,
+  "cold_read": null,
+  "cold_scan_repeats": true,
+  "compute_p_values": false,
+  "covariate_columns": 27,
+  "device": "cuda:0",
+  "first_scan": {
+    "first_result_seconds": 17.401495369616896,
+    "peak_gpu_allocated_gb": 0.954076672,
+    "scan_checksum": 13089616136.36541,
+    "scan_decoded_gbps": 16.889532604077136,
+    "scan_packed_gbps": 1.0556906727694508,
+    "scan_variants_per_second": 189770.0292592937,
+    "scan_wall_seconds": 42.61000028066337
+  },
+  "gpu_name": "NVIDIA A100-SXM4-80GB",
+  "h2d_gbps": 15.717864376925991,
+  "metadata_cache_path": "/data/zxie3/torchgwas_bed_benchmark/discovery_hardcall/metadata_cache/T1_discovery_hardcall_53a1c06139ef.bim.cache",
+  "n_samples": 22250,
+  "n_traits": 128,
+  "n_variants": 8086101,
+  "repeat_cache_eviction_requested": [
+    true,
+    true,
+    true
+  ],
+  "scan_exclusion_counts": {
+    "invariant": 0,
+    "missing": 0
+  },
+  "steady_scan_median": {
+    "first_result_seconds": 0.47068717796355486,
+    "peak_gpu_allocated_gb": 0.716875264,
+    "scan_checksum": 13089616136.36541,
+    "scan_decoded_gbps": 26.344954399284273,
+    "scan_packed_gbps": 1.6467076553170608,
+    "scan_variants_per_second": 296010.7235874637,
+    "scan_wall_seconds": 27.316919137258083
+  },
+  "steady_scan_repeats": [
+    {
+      "first_result_seconds": 0.4725940967909992,
+      "peak_gpu_allocated_gb": 0.716875264,
+      "scan_checksum": 13089616136.36541,
+      "scan_decoded_gbps": 26.23732357544615,
+      "scan_packed_gbps": 1.6399801241596286,
+      "scan_variants_per_second": 294801.388488159,
+      "scan_wall_seconds": 27.42897868109867
+    },
+    {
+      "first_result_seconds": 0.47068717796355486,
+      "peak_gpu_allocated_gb": 0.716875264,
+      "scan_checksum": 13089616136.36541,
+      "scan_decoded_gbps": 26.344954399284273,
+      "scan_packed_gbps": 1.6467076553170608,
+      "scan_variants_per_second": 296010.7235874637,
+      "scan_wall_seconds": 27.316919137258083
+    },
+    {
+      "first_result_seconds": 0.3992367438040674,
+      "peak_gpu_allocated_gb": 0.716875264,
+      "scan_checksum": 13089616136.36541,
+      "scan_decoded_gbps": 27.71419389400359,
+      "scan_packed_gbps": 1.7322928160937299,
+      "scan_variants_per_second": 311395.43701127626,
+      "scan_wall_seconds": 25.967307284940034
+    }
+  ],
+  "tf32_matmul_allowed": false,
+  "warm_read": null,
+  "workers": 4
+}

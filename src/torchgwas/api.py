@@ -30,12 +30,31 @@ def _coerce_vector_or_path(value):
     if value is None:
         return None
     if isinstance(value, (str, Path)):
+        if Path(value).suffix.lower() == ".npy":
+            return np.asarray(np.load(value, allow_pickle=False))
         return load_vector(value)
     return np.asarray(value)
 
 
 def _prefer_vector(primary, fallback):
     return primary if primary is not None else fallback
+
+
+def _select_chunked_samples(genotype, genotype_sample_ids, requested_sample_ids):
+    if requested_sample_ids is None or genotype_sample_ids is None:
+        return genotype, genotype_sample_ids, requested_sample_ids
+    requested = np.asarray([str(value) for value in requested_sample_ids], dtype=object)
+    stored = np.asarray([str(value) for value in genotype_sample_ids], dtype=object)
+    if hasattr(genotype, "select_samples"):
+        genotype.select_samples(requested)
+        selected = np.asarray(genotype.sample_ids, dtype=object)
+        return genotype, selected, selected
+    if not np.array_equal(requested, stored):
+        raise ValueError(
+            f"{type(genotype).__name__} does not support sample subsetting; "
+            "pre-align or convert the genotype input first"
+        )
+    return genotype, genotype_sample_ids, stored
 
 
 def _resolve_linear_compute_dtype(genotype, compute_dtype: str) -> str:
@@ -118,7 +137,7 @@ def _write_linear_table_streaming(
         include_variant_metadata=variant_metadata is not None,
     )
     written = 0
-    trait_heaps: list[list[tuple[float, int, dict]]] | None = None
+    trait_heaps: list[list[tuple[float, int, float, float]]] | None = None
     if topk_per_trait is not None:
         trait_heaps = [[] for _ in trait_names]
     critical_t = None
@@ -134,16 +153,34 @@ def _write_linear_table_streaming(
             chunk_rows: list[dict] = []
             for trait_index, trait_name in enumerate(trait_names):
                 t_col = t_chunk[:, trait_index]
+                finite_offsets = np.flatnonzero(np.isfinite(t_col))
                 if p_value_threshold is not None:
-                    candidate_offsets = np.flatnonzero(np.abs(t_col) >= critical_t)
+                    candidate_offsets = finite_offsets[
+                        np.abs(t_col[finite_offsets]) >= critical_t
+                    ]
                     if candidate_offsets.size == 0:
                         continue
                 else:
-                    candidate_offsets = np.arange(t_col.shape[0])
+                    candidate_offsets = finite_offsets
                 if topk_per_trait is not None and candidate_offsets.size > topk_per_trait:
                     candidate_scores = np.abs(t_col[candidate_offsets])
                     keep_local = np.argpartition(candidate_scores, -topk_per_trait)[-topk_per_trait:]
                     candidate_offsets = candidate_offsets[keep_local]
+                if trait_heaps is not None:
+                    heap = trait_heaps[trait_index]
+                    for marker_offset in candidate_offsets.tolist():
+                        score = abs(float(t_col[marker_offset]))
+                        item = (
+                            score,
+                            start + marker_offset,
+                            float(beta_chunk[marker_offset, trait_index]),
+                            float(t_col[marker_offset]),
+                        )
+                        if len(heap) < topk_per_trait:
+                            heapq.heappush(heap, item)
+                        elif score > heap[0][0]:
+                            heapq.heapreplace(heap, item)
+                    continue
                 if p_chunk is None:
                     if df is None:
                         raise ValueError("df is required when p-values are deferred")
@@ -170,21 +207,33 @@ def _write_linear_table_streaming(
                         marker_index=start + marker_offset,
                         variant_metadata=variant_metadata,
                     )
-                    if trait_heaps is None:
-                        chunk_rows.append(row)
-                        written += 1
-                    else:
-                        score = abs(float(t_col[marker_offset]))
-                        heap = trait_heaps[trait_index]
-                        if len(heap) < topk_per_trait:
-                            heapq.heappush(heap, (score, start + marker_offset, row))
-                        elif score > heap[0][0]:
-                            heapq.heapreplace(heap, (score, start + marker_offset, row))
+                    chunk_rows.append(row)
+                    written += 1
             if chunk_rows:
                 writer.writerows(chunk_rows)
         if trait_heaps is not None:
-            for heap in trait_heaps:
-                for _, _, row in sorted(heap, key=lambda item: (item[0], item[1]), reverse=True):
+            if df is None:
+                raise ValueError("df is required when p-values are deferred")
+            for trait_index, heap in enumerate(trait_heaps):
+                selected = sorted(heap, key=lambda item: (item[0], item[1]), reverse=True)
+                selected_t = np.asarray([item[3] for item in selected], dtype=np.float64)
+                selected_p = 2.0 * special.stdtr(df, -np.abs(selected_t))
+                selected_logp = upper_tail_log10(selected_p)
+                for selected_index, (_, marker_index, beta_value, t_value) in enumerate(selected):
+                    row = _make_linear_row(
+                        marker_name=marker_names[marker_index],
+                        trait_name=trait_names[trait_index],
+                        n_samples=n_samples,
+                        beta_value=beta_value,
+                        t_value=t_value,
+                        p_value=float(selected_p[selected_index]),
+                        log10_p=float(selected_logp[selected_index]),
+                        return_beta=return_beta,
+                        return_se=return_se,
+                        return_t=return_t,
+                        marker_index=marker_index,
+                        variant_metadata=variant_metadata,
+                    )
                     writer.writerow(row)
                     written += 1
     return written
@@ -239,8 +288,15 @@ def run_linear_gwas(
     else:
         genotype = np.asarray(genotype)
         geno_sample_ids, geno_marker_ids = None, None
+    requested_sample_ids = _coerce_vector_or_path(sample_ids)
+    if isinstance(genotype, ChunkedGenotype):
+        genotype, geno_sample_ids, requested_sample_ids = _select_chunked_samples(
+            genotype,
+            geno_sample_ids,
+            requested_sample_ids,
+        )
     marker_ids = _prefer_vector(_coerce_vector_or_path(marker_ids), geno_marker_ids)
-    sample_ids = _prefer_vector(_coerce_vector_or_path(sample_ids), geno_sample_ids)
+    sample_ids = _prefer_vector(requested_sample_ids, geno_sample_ids)
     variant_metadata = getattr(genotype, "variant_metadata", None)
     if phenotype_table is not None:
         if sample_ids is None:
@@ -287,7 +343,11 @@ def run_linear_gwas(
             genotype_chunk_size=effective_chunk_size,
             validate_genotype=not fused_bed_qc,
         )
-        marker_names = [f"marker_{i}" for i in range(genotype.shape[1])] if marker_ids is None else [str(v) for v in marker_ids[: genotype.shape[1]]]
+        marker_names = (
+            [f"marker_{i}" for i in range(genotype.shape[1])]
+            if marker_ids is None
+            else marker_ids[: genotype.shape[1]]
+        )
         trait_names = trait_columns or [f"trait_{i}" for i in range(phenotype.shape[1])]
         genotype_shape = list(genotype.shape)
         if output_dir is not None:
@@ -356,6 +416,12 @@ def run_linear_gwas(
                             row[field] = int(value) if field == "position" else str(value)
                     table.append(row)
             n_rows = int(beta.shape[0] * beta.shape[1])
+        scan_exclusions = getattr(genotype, "_last_scan_exclusion_counts", None)
+        if scan_exclusions is not None:
+            qc["genotype_exclusion_counts"] = {
+                key: int(value) for key, value in scan_exclusions.items()
+            }
+            qc["n_variants_excluded"] = int(sum(scan_exclusions.values()))
     else:
         genotype, phenotype, covariates, qc = prepare_inputs(genotype, phenotype, covariates)
         beta, t_stat, p_value, q_matrix = linear_scan(
@@ -494,8 +560,15 @@ def run_multivariate_gwas(
     else:
         genotype = np.asarray(genotype)
         geno_sample_ids, geno_marker_ids = None, None
+    requested_sample_ids = _coerce_vector_or_path(sample_ids)
+    if isinstance(genotype, ChunkedGenotype):
+        genotype, geno_sample_ids, requested_sample_ids = _select_chunked_samples(
+            genotype,
+            geno_sample_ids,
+            requested_sample_ids,
+        )
     marker_ids = _prefer_vector(_coerce_vector_or_path(marker_ids), geno_marker_ids)
-    sample_ids = _prefer_vector(_coerce_vector_or_path(sample_ids), geno_sample_ids)
+    sample_ids = _prefer_vector(requested_sample_ids, geno_sample_ids)
     if phenotype_table is not None:
         if sample_ids is None:
             raise ValueError("tabular phenotype input requires genotype sample IDs")

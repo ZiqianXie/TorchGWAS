@@ -65,6 +65,31 @@ CPU/NUMA affinity controls when comparing GPUs, and do not add per-GPU
 bandwidths unless the links have been shown to operate concurrently without
 sharing a bottleneck.
 
+For an existing BED with matched phenotype and covariate arrays, measure the
+packed read boundary and the steady scan separately. Add `--retain-t-array`
+when the production contract returns the complete marker-by-trait t-statistic
+matrix in host NumPy memory:
+
+```bash
+PYTHONPATH=src:benchmarks python benchmarks/benchmark_bed_gpu_real.py \
+  --bed /path/to/study.bed \
+  --phenotype /path/to/phenotypes.npy \
+  --covariates /path/to/covariates.npy \
+  --device cuda:0 \
+  --chunk-size 5000 \
+  --workers 4 \
+  --repeats 3 \
+  --cold-scan-repeats \
+  --skip-read-probes \
+  --retain-t-array
+```
+
+With `--cold-scan-repeats`, the script requests per-file client page-cache
+eviction before every measured repeat when `posix_fadvise` is available. Use
+those cold repeats for manuscript-facing storage claims. First-use compilation
+is reported separately; hot-cache measurements are diagnostic only and should
+not replace cold-input results.
+
 ## Calibrated stage runtime predictor
 
 The predictor separates compressed disk read, CPU Zstandard decode, host-to-device transfer, and GPU compute. The hardware model uses measured FP32 throughput, CPU frequency, decode thread count, and H2D bandwidth; `--pipeline-contention-factor` comes from a short joint-stage calibration and captures NUMA/PCIe contention.

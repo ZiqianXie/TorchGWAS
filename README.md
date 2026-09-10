@@ -125,6 +125,13 @@ positional read and host-to-device transfer, then are decoded on the GPU. The
 reader uses independent ordered chunk reads, pinned buffer reuse, and separate
 copy/compute streams. GPU indices are not interchangeable: benchmark the
 selected device because PCIe and NUMA topology can change its H2D bandwidth.
+For a combined-cohort BED, `--sample-ids` may be a text vector or one-dimensional
+`.npy` array; calls are gathered in that exact IID order directly from the
+packed bytes. BED variants containing a missing call in any selected sample,
+and variants with zero residual variance, are skipped and counted in `qc.json`.
+Because the any-missing rule can remove many sites from hard-called imputed
+data, use a complete-data BED (for example, one prepared with `--geno 0`) when
+that loss is not intended.
 
 ## Documentation
 

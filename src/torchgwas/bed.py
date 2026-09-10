@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import queue
+import hashlib
+import json
+import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
@@ -12,6 +15,111 @@ from .streaming import OrderedChunkLoader
 
 
 _BED_MAGIC = b"\x6c\x1b\x01"
+_BIM_CACHE_SCHEMA = 1
+
+
+def _bim_cache_path(cache_dir: str | Path, bim_path: Path) -> Path:
+    stat = bim_path.stat()
+    identity = json.dumps(
+        {
+            "schema": _BIM_CACHE_SCHEMA,
+            "path": str(bim_path.resolve()),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        },
+        sort_keys=True,
+    )
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:12]
+    directory = Path(cache_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{bim_path.stem}_{digest}.bim.cache"
+
+
+def write_plink_bim_cache(
+    cache_dir: str | Path,
+    bim_path: str | Path,
+    *,
+    chromosomes,
+    marker_ids,
+    positions,
+    other_alleles,
+    effect_alleles,
+) -> Path:
+    """Write a validated binary BIM cache for repeated large BED analyses."""
+
+    bim_path = Path(bim_path)
+    cache_path = _bim_cache_path(cache_dir, bim_path)
+    arrays = {
+        "chromosomes": np.asarray(chromosomes, dtype=str),
+        "marker_ids": np.asarray(marker_ids, dtype=str),
+        "positions": np.asarray(positions, dtype=np.int64),
+        "other_alleles": np.asarray(other_alleles, dtype=str),
+        "effect_alleles": np.asarray(effect_alleles, dtype=str),
+    }
+    lengths = {value.shape[0] for value in arrays.values()}
+    if len(lengths) != 1:
+        raise ValueError("BIM cache arrays have inconsistent lengths")
+    if cache_path.is_dir():
+        return cache_path
+    stat = bim_path.stat()
+    directory = cache_path.parent
+    with tempfile.TemporaryDirectory(
+        prefix=f".{cache_path.name}.",
+        dir=directory,
+    ) as temporary_name:
+        temporary = Path(temporary_name)
+        for name, array in arrays.items():
+            np.save(temporary / f"{name}.npy", array, allow_pickle=False)
+        (temporary / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": _BIM_CACHE_SCHEMA,
+                    "bim_path": str(bim_path.resolve()),
+                    "bim_size": int(stat.st_size),
+                    "bim_mtime_ns": int(stat.st_mtime_ns),
+                    "n_variants": next(iter(lengths)),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        temporary.replace(cache_path)
+    return cache_path
+
+
+def _load_plink_bim_cache(cache_dir: str | Path, bim_path: Path):
+    cache_path = _bim_cache_path(cache_dir, bim_path)
+    if not cache_path.is_dir():
+        return None, cache_path
+    manifest_path = cache_path / "manifest.json"
+    if not manifest_path.is_file():
+        return None, cache_path
+    manifest = json.loads(manifest_path.read_text())
+    stat = bim_path.stat()
+    valid = (
+        int(manifest.get("schema", -1)) == _BIM_CACHE_SCHEMA
+        and str(manifest.get("bim_path")) == str(bim_path.resolve())
+        and int(manifest.get("bim_size", -1)) == stat.st_size
+        and int(manifest.get("bim_mtime_ns", -1)) == stat.st_mtime_ns
+    )
+    if not valid:
+        return None, cache_path
+    arrays = tuple(
+        np.load(cache_path / f"{key}.npy", mmap_mode="r", allow_pickle=False)
+        for key in (
+            "chromosomes",
+            "marker_ids",
+            "positions",
+            "other_alleles",
+            "effect_alleles",
+        )
+    )
+    if len({array.shape[0] for array in arrays}) != 1:
+        raise ValueError(f"BIM cache arrays have inconsistent lengths: {cache_path}")
+    if arrays[0].shape[0] != int(manifest["n_variants"]):
+        raise ValueError(f"BIM cache length does not match manifest: {cache_path}")
+    return arrays, cache_path
 
 
 def _make_a2_dosage_lut() -> np.ndarray:
@@ -64,34 +172,81 @@ class PlinkBedGenotype:
         fam: str | Path | None = None,
         reader_workers: int = 4,
         prefetch_chunks: int = 4,
+        metadata_cache_dir: str | Path | None = None,
     ) -> None:
         self.bed_path, self.bim_path, self.fam_path = resolve_plink_triplet(genotype_path, bim=bim, fam=fam)
         for path in (self.bed_path, self.bim_path, self.fam_path):
             if not path.is_file():
                 raise FileNotFoundError(path)
 
-        fam_table = pd.read_csv(self.fam_path, sep=r"\s+", header=None, dtype=str)
-        bim_table = pd.read_csv(self.bim_path, sep=r"\s+", header=None, dtype=str)
-        if fam_table.shape[1] < 2:
+        fam_table = pd.read_csv(
+            self.fam_path,
+            sep=r"\s+",
+            header=None,
+            dtype=str,
+            usecols=[0, 1],
+            memory_map=True,
+        )
+        cached_bim = None
+        self.metadata_cache_path = None
+        if metadata_cache_dir is not None:
+            cached_bim, self.metadata_cache_path = _load_plink_bim_cache(
+                metadata_cache_dir,
+                self.bim_path,
+            )
+        bim_table = None
+        if cached_bim is None:
+            bim_table = pd.read_csv(
+                self.bim_path,
+                sep=r"\s+",
+                header=None,
+                usecols=[0, 1, 3, 4, 5],
+                dtype={0: str, 1: str, 3: np.int64, 4: str, 5: str},
+                memory_map=True,
+            )
+        if fam_table.shape[1] != 2:
             raise ValueError(f"invalid FAM file (expected at least 2 columns): {self.fam_path}")
-        if bim_table.shape[1] < 6:
+        if bim_table is not None and bim_table.shape[1] != 5:
             raise ValueError(f"invalid BIM file (expected at least 6 columns): {self.bim_path}")
 
-        self.family_ids = fam_table.iloc[:, 0].to_numpy(dtype=object)
-        self.sample_ids = fam_table.iloc[:, 1].to_numpy(dtype=object)
-        self.chromosomes = bim_table.iloc[:, 0].to_numpy(dtype=object)
-        self.marker_ids = bim_table.iloc[:, 1].to_numpy(dtype=object)
-        self.positions = pd.to_numeric(bim_table.iloc[:, 3], errors="raise").to_numpy(dtype=np.int64)
-        self.other_alleles = bim_table.iloc[:, 4].to_numpy(dtype=object)  # A1
-        self.effect_alleles = bim_table.iloc[:, 5].to_numpy(dtype=object)  # A2 dosage
+        self._stored_family_ids = fam_table.iloc[:, 0].to_numpy(dtype=object)
+        self._stored_sample_ids = fam_table.iloc[:, 1].to_numpy(dtype=object)
+        self.family_ids = self._stored_family_ids
+        self.sample_ids = self._stored_sample_ids
+        if cached_bim is None:
+            self.chromosomes = bim_table.iloc[:, 0].to_numpy(dtype=object)
+            self.marker_ids = bim_table.iloc[:, 1].to_numpy(dtype=object)
+            self.positions = bim_table[3].to_numpy(dtype=np.int64)
+            self.other_alleles = bim_table[4].to_numpy(dtype=object)  # A1
+            self.effect_alleles = bim_table[5].to_numpy(dtype=object)  # A2 dosage
+            if metadata_cache_dir is not None:
+                self.metadata_cache_path = write_plink_bim_cache(
+                    metadata_cache_dir,
+                    self.bim_path,
+                    chromosomes=self.chromosomes,
+                    marker_ids=self.marker_ids,
+                    positions=self.positions,
+                    other_alleles=self.other_alleles,
+                    effect_alleles=self.effect_alleles,
+                )
+        else:
+            (
+                self.chromosomes,
+                self.marker_ids,
+                self.positions,
+                self.other_alleles,
+                self.effect_alleles,
+            ) = cached_bim
         self.reader_workers = int(reader_workers)
         self.prefetch_chunks = int(prefetch_chunks)
         if self.reader_workers <= 0 or self.prefetch_chunks <= 0:
             raise ValueError("reader_workers and prefetch_chunks must be positive")
 
-        self._n_samples = int(self.sample_ids.size)
+        self._stored_n_samples = int(self._stored_sample_ids.size)
+        self._sample_indices: np.ndarray | None = None
+        self._n_samples = self._stored_n_samples
         self._n_markers = int(self.marker_ids.size)
-        self._bytes_per_variant = (self._n_samples + 3) // 4
+        self._bytes_per_variant = (self._stored_n_samples + 3) // 4
         expected_size = 3 + self._n_markers * self._bytes_per_variant
         actual_size = self.bed_path.stat().st_size
         if actual_size != expected_size:
@@ -133,6 +288,31 @@ class PlinkBedGenotype:
             "other_allele": self.other_alleles,
         }
 
+    def select_samples(self, sample_ids) -> "PlinkBedGenotype":
+        """Restrict and reorder samples by FAM IID without rewriting the BED."""
+
+        requested = np.asarray([str(value) for value in sample_ids], dtype=object)
+        if requested.ndim != 1 or requested.size == 0:
+            raise ValueError("sample_ids must be a non-empty one-dimensional sequence")
+        if np.unique(requested).size != requested.size:
+            raise ValueError("requested sample_ids contain duplicate IID values")
+        stored = np.asarray([str(value) for value in self._stored_sample_ids], dtype=object)
+        if np.unique(stored).size != stored.size:
+            raise ValueError("BED FAM contains duplicate IID values; select samples by FID+IID")
+        lookup = {sample_id: index for index, sample_id in enumerate(stored.tolist())}
+        missing = [sample_id for sample_id in requested.tolist() if sample_id not in lookup]
+        if missing:
+            preview = ", ".join(missing[:5])
+            raise ValueError(
+                f"{len(missing)} requested sample IDs are absent from {self.fam_path} ({preview})"
+            )
+        indices = np.asarray([lookup[sample_id] for sample_id in requested], dtype=np.int64)
+        self._sample_indices = indices
+        self.sample_ids = stored[indices]
+        self.family_ids = self._stored_family_ids[indices]
+        self._n_samples = int(indices.size)
+        return self
+
     def _read_exact(self, offset: int, length: int) -> bytes:
         chunks: list[bytes] = []
         received = 0
@@ -150,7 +330,11 @@ class PlinkBedGenotype:
         count = end - start
         raw = self._read_exact(3 + start * self._bytes_per_variant, count * self._bytes_per_variant)
         packed = np.frombuffer(raw, dtype=np.uint8).reshape(count, self._bytes_per_variant)
-        decoded = _A2_DOSAGE_LUT[packed].reshape(count, self._bytes_per_variant * 4)[:, : self._n_samples]
+        decoded = _A2_DOSAGE_LUT[packed].reshape(count, self._bytes_per_variant * 4)[
+            :, : self._stored_n_samples
+        ]
+        if self._sample_indices is not None:
+            decoded = decoded[:, self._sample_indices]
         return np.asarray(decoded.T, dtype=dtype, order="C")
 
     def __getitem__(self, key) -> np.ndarray:

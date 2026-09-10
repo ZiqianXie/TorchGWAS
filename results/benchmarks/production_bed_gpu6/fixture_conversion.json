@@ -1,0 +1,17 @@
+{
+  "bed_bytes": 44982979866,
+  "bed_encode_seconds": 439.67100420221686,
+  "bim_a2": "BGEN allele 2 (alternative allele; prep a1)",
+  "hard_call_rule": "dosage_u8 0..63 -> 0; 64..191 -> 1; 192..255 -> 2",
+  "metadata_seconds": 6.300397217273712e-07,
+  "n_samples": 22250,
+  "n_variants": 8086101,
+  "output_prefix": "/data/zxie3/torchgwas_bed_benchmark/discovery_hardcall/T1_discovery_hardcall",
+  "packing_device": "cuda:0",
+  "resumed_at_variant": 2150000,
+  "source_prep": "/data484_4/zxie3/torchGWAS1.1/prep_discovery.npz",
+  "source_project_root": "/data484_4/zxie3/torchGWAS1.1",
+  "source_sample_order": "/data484_4/zxie3/torchGWAS1.1/T1_discovery_sample_order.npy",
+  "source_store": "/data/zxie3/GWAS/zs_l15",
+  "total_seconds": 447.23210811428726
+}
